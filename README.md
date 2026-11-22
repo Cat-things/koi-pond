@@ -31,6 +31,14 @@ claude plugin install koi-pond --marketplace Cat-things/koi-pond
 
 The pond is drawn in the terminal only; other surfaces are left unchanged.
 
+## Options
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `avoidOverlap` (Avoid overlap) | on | Fish steer into separate lanes, swim partly past the pond's edge, or turn back instead of overlapping. Off, they pass through one another. |
+
+Change it from the plugin's row in `/config`.
+
 ## License
 
 MIT

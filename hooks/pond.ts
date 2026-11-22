@@ -9,8 +9,10 @@ const KINDS: Kind[] = ['kohaku', 'sanke', 'showa', 'ogon', 'chagoi', 'kohaku']
 
 type Fish = {
   x: number // head position, pixels
-  baseY: number
+  y: number // body center line, pixels
+  targetY: number // where the fish is steering to
   dir: 1 | -1
+  turnCooldown: number // frames before this fish may turn around again
   len: number
   half: number // half body width at its widest
   speed: number
@@ -105,7 +107,17 @@ function base64(bytes: Uint8Array): string {
 
 // ---------- the pond ----------
 
+// How far ahead, in frames, fish look for one another when avoiding overlap.
+const LOOKAHEAD = 70
+
 export class Pond {
+  /** When true, fish steer around one another or turn back instead of overlapping. */
+  private readonly avoidOverlap: boolean
+
+  constructor(avoidOverlap = true) {
+    this.avoidOverlap = avoidOverlap
+  }
+
   private width = 0
   private height = 0
   private frame = 0
@@ -144,15 +156,26 @@ export class Pond {
     const half = Math.max(2.5, Math.min(this.height * 0.28, len * 0.14))
     const dir: 1 | -1 = rand() < 0.5 ? 1 : -1
     const margin = half + 3
-    const x = anywhere
-      ? rand() * this.width
-      : dir === 1
-        ? -2 - rand() * this.width * 0.4
-        : this.width + len + 2 + rand() * this.width * 0.4
+    const pickX = () =>
+      anywhere
+        ? rand() * this.width
+        : dir === 1
+          ? -2 - rand() * this.width * 0.4
+          : this.width + len + 2 + rand() * this.width * 0.4
+    let x = pickX()
+    const y = this.freeLane(margin)
+    // Start clear of the others: try a few spots for one no fish covers.
+    if (this.avoidOverlap) {
+      for (let i = 0; i < 12 && this.isCrowded(x, dir, len, half, y); i++) {
+        x = pickX()
+      }
+    }
     return {
       x,
-      baseY: margin + rand() * Math.max(1, this.height - margin * 2),
+      y,
+      targetY: y,
       dir,
+      turnCooldown: 0,
       len,
       half,
       speed: 0.25 + rand() * 0.35,
@@ -162,8 +185,143 @@ export class Pond {
     }
   }
 
+  // A spawn height, picked to sit as far from the other fish as possible.
+  private freeLane(margin: number): number {
+    const span = Math.max(1, this.height - margin * 2)
+    if (!this.avoidOverlap || this.fish.length === 0) {
+      return margin + rand() * span
+    }
+    let best = margin
+    let bestGap = -1
+    for (let i = 0; i < 8; i++) {
+      const y = margin + rand() * span
+      let gap = Infinity
+      for (const g of this.fish) {
+        gap = Math.min(gap, Math.abs(g.y - y))
+      }
+      if (gap > bestGap) {
+        bestGap = gap
+        best = y
+      }
+    }
+    return best
+  }
+
+  private isCrowded(x: number, dir: 1 | -1, len: number, half: number, y: number): boolean {
+    const a = Math.min(x, x - len * dir) - 4
+    const b = Math.max(x, x - len * dir) + 4
+    return this.fish.some(g => {
+      const ga = Math.min(g.x, g.x - g.len * g.dir)
+      const gb = Math.max(g.x, g.x - g.len * g.dir)
+      return ga <= b && a <= gb && Math.abs(g.y - y) < (half + g.half) * 1.2 + 1
+    })
+  }
+
+  // The pixel columns a fish covers now, widened by where it will be soon.
+  private reach(f: Fish, frames = LOOKAHEAD): [number, number] {
+    const tail = f.x - f.len * f.dir
+    const ahead = f.x + f.speed * f.dir * frames
+    return [Math.min(tail, ahead, f.x), Math.max(tail, ahead, f.x)]
+  }
+
+  // Turns a fish around in place: the tail becomes the head, so the body
+  // keeps the span it had and nothing jumps.
+  private turn(f: Fish): void {
+    f.x -= f.dir * f.len
+    f.dir = f.dir === 1 ? -1 : 1
+    f.turnCooldown = 120
+  }
+
+  // Two fish that can't pass: one turns back, or, if both just turned,
+  // the one behind slows down behind the other.
+  private giveWay(f: Fish, g: Fish, turned: Set<Fish>): void {
+    if (turned.has(f) || turned.has(g)) return
+    const isFacing = f.dir !== g.dir && (g.x - f.x) * f.dir > 0
+    const isMovingApart = f.dir !== g.dir && !isFacing
+    if (isMovingApart) return
+    // Head-on: whichever may turn sooner; same way: the one behind.
+    const turner = isFacing ? (f.turnCooldown <= g.turnCooldown ? f : g) : (g.x - f.x) * f.dir > 0 ? f : g
+    const other = turner === f ? g : f
+    if (turner.turnCooldown === 0) {
+      this.turn(turner)
+      turned.add(turner)
+      // Now going the same way: keep ahead of the one it turned from.
+      if (turner.dir === other.dir) {
+        turner.speed = Math.max(turner.speed, other.speed + 0.05)
+      }
+    } else if (!isFacing) {
+      turner.speed = Math.max(0.12, Math.min(turner.speed, other.speed - 0.05))
+    } else if (other.turnCooldown === 0) {
+      this.turn(other)
+      turned.add(other)
+    }
+  }
+
+  private avoid(): void {
+    const fish = this.fish
+    // Each fish may leave the pond by part of its body, so a dodge can use the edges.
+    const lo = (f: Fish) => -f.half * 0.5
+    const hi = (f: Fish) => this.height + f.half * 0.5
+    // Fins and tail reach about 1.15 half-widths from the center line.
+    const sep = (f: Fish, g: Fish) => (f.half + g.half) * 1.2 + 1
+
+    // Pairs whose paths cross within the lookahead.
+    const pairs: [Fish, Fish][] = []
+    for (let i = 0; i < fish.length; i++) {
+      for (let j = i + 1; j < fish.length; j++) {
+        const f = fish[i]!
+        const g = fish[j]!
+        const [fa, fb] = this.reach(f)
+        const [ga, gb] = this.reach(g)
+        if (fb >= ga && gb >= fa) pairs.push([f, g])
+      }
+    }
+
+    // About to touch and not yet apart: no time to dodge, so one turns back.
+    const turned = new Set<Fish>()
+    for (const [f, g] of pairs) {
+      const [fa, fb] = this.reach(f, 12)
+      const [ga, gb] = this.reach(g, 12)
+      if (fb >= ga && gb >= fa && Math.abs(f.y - g.y) < sep(f, g) * 0.85) {
+        this.giveWay(f, g, turned)
+      }
+    }
+
+    // Spread the lanes: push crossing pairs apart until each has room,
+    // the upper one going up, within the pond's edges.
+    const target = new Map<Fish, number>()
+    for (const f of fish) target.set(f, f.y)
+    for (let round = 0; round < 8; round++) {
+      for (const [f, g] of pairs) {
+        const [up, down] = target.get(f)! <= target.get(g)! ? [f, g] : [g, f]
+        const gap = target.get(down)! - target.get(up)!
+        const need = sep(f, g) - gap
+        if (need <= 0) continue
+        target.set(up, Math.max(lo(up), target.get(up)! - need / 2))
+        target.set(down, Math.min(hi(down), target.get(down)! + need / 2))
+      }
+    }
+
+    // Still no room for a pair: one of them turns back.
+    for (const [f, g] of pairs) {
+      if (Math.abs(target.get(f)! - target.get(g)!) < sep(f, g) * 0.9) {
+        this.giveWay(f, g, turned)
+      }
+    }
+
+    for (const f of fish) {
+      f.targetY = target.get(f)!
+      f.y += (f.targetY - f.y) * 0.08
+      if (f.turnCooldown > 0) f.turnCooldown--
+    }
+  }
+
+
   private step(): void {
     this.frame++
+    if (this.avoidOverlap) {
+      this.avoid()
+    }
     for (let i = 0; i < this.fish.length; i++) {
       const f = this.fish[i]!
       f.x += f.speed * f.dir
@@ -198,7 +356,7 @@ export class Pond {
     const s = ((f.x - px) * f.dir) / f.len
     if (s < 0 || s > 1) return 0
     const t = this.frame
-    const yc = f.baseY + Math.sin(t * 0.02 + f.phase) * 1.5
+    const yc = f.y + Math.sin(t * 0.02 + f.phase) * (this.avoidOverlap ? 0.6 : 1.5)
     const wag = Math.sin(t * 0.32 + f.phase - s * 4.5) * f.half * 0.9 * s * s
     const dy = py + 0.5 - (yc + wag)
     const ady = Math.abs(dy)

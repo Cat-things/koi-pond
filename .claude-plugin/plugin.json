@@ -1,1 +1,13 @@
-{ "name": "koi-pond", "version": "0.1.0", "description": "Animated block-pixel koi pond above the prompt, in the Salma Koi Classic palette" }
+{
+  "name": "koi-pond",
+  "version": "0.2.0",
+  "description": "Animated block-pixel koi pond above the prompt, in the Salma Koi Classic palette",
+  "userConfig": {
+    "avoidOverlap": {
+      "type": "boolean",
+      "title": "Avoid overlap",
+      "description": "Fish swim above or below each other, or turn back, instead of overlapping",
+      "default": true
+    }
+  }
+}

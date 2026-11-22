@@ -6,8 +6,8 @@ const KEY = 'pond'
 const ROWS = 9
 const FRAME_MS = 66
 
-export const register: Register = on => {
-  const pond = new Pond()
+export const register: Register = (on, options) => {
+  const pond = new Pond(options.avoidOverlap !== false)
   let site: string | undefined
   let columns = 0
   let rows = 0
